@@ -56,10 +56,23 @@ type View =
 type BandDataValue = {
   songs: Song[];
   saveNote: (songId: string, note: string) => Promise<void>;
+  addGig: (gig: NewGigInput) => Promise<string | void>;
+};
+type NewGigInput = {
+  title: string;
+  venue: string;
+  address: string;
+  date: string;
+  doors: string;
+  soundcheck: string;
+  downbeat: string;
+  status: string;
+  advance: string;
 };
 const BandDataContext = createContext<BandDataValue>({
   songs: seedSongs,
   saveNote: async () => {},
+  addGig: async () => {},
 });
 const useBandData = () => useContext(BandDataContext);
 const formatDuration = (seconds: number | null) => {
@@ -582,6 +595,41 @@ export default function App() {
         { onConflict: "gig_id,user_id" },
       );
   };
+  const addGig = async (input: NewGigInput) => {
+    if (!user || !canEdit(user.role))
+      return "Only Administrators and Bandleaders can add gigs.";
+    if (!input.title || !input.venue || !input.date || !input.downbeat)
+      return "Please complete the title, venue, date, and downbeat.";
+    if (!supabase) {
+      setGigs((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          ...input,
+          setlist: [],
+          availability: {},
+          itinerary: [],
+        },
+      ]);
+      return;
+    }
+    const toTimestamp = (time: string) =>
+      time ? new Date(`${input.date}T${time}:00`).toISOString() : null;
+    const { error } = await supabase.from("gigs").insert({
+      title: input.title.trim(),
+      venue: input.venue.trim(),
+      address: input.address.trim(),
+      starts_at: toTimestamp(input.downbeat),
+      doors_at: toTimestamp(input.doors),
+      soundcheck_at: toTimestamp(input.soundcheck),
+      status: input.status,
+      advance: input.advance.trim(),
+      itinerary: [],
+      created_by: user.id,
+    });
+    if (error) return error.message;
+    await loadBandData(user.role, user.id);
+  };
 
   if (authLoading)
     return (
@@ -600,7 +648,7 @@ export default function App() {
   };
   if (stage) return <StageMode gig={gig} onClose={() => setStage(false)} />;
   return (
-    <BandDataContext.Provider value={{ songs: catalog, saveNote }}>
+    <BandDataContext.Provider value={{ songs: catalog, saveNote, addGig }}>
       <div className="app">
         <aside className={menu ? "open" : ""}>
           <div className="logo">
@@ -1084,7 +1132,8 @@ function Calendar({
   onAvailability: (id: string, a: Availability) => void;
   onStage: () => void;
 }) {
-  const { songs } = useBandData();
+  const { songs, addGig } = useBandData();
+  const [showAddGig, setShowAddGig] = useState(false);
   if (!gig)
     return (
       <>
@@ -1094,7 +1143,11 @@ function Calendar({
             <h1>Gig calendar</h1>
             <p>Shows, rehearsals and travel in one place.</p>
           </div>
-          <button className="primary compact">
+          <button
+            className="primary compact"
+            disabled={!canEdit(user.role)}
+            onClick={() => setShowAddGig(true)}
+          >
             <Plus /> Add gig
           </button>
         </div>
@@ -1131,6 +1184,16 @@ function Calendar({
             </button>
           ))}
         </div>
+        {showAddGig && (
+          <GigForm
+            onClose={() => setShowAddGig(false)}
+            onSave={async (input) => {
+              const error = await addGig(input);
+              if (!error) setShowAddGig(false);
+              return error;
+            }}
+          />
+        )}
       </>
     );
   return (
@@ -1216,6 +1279,133 @@ function Calendar({
         </article>
       </div>
     </>
+  );
+}
+function GigForm({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (gig: NewGigInput) => Promise<string | void>;
+}) {
+  const [form, setForm] = useState<NewGigInput>({
+    title: "",
+    venue: "",
+    address: "",
+    date: new Date().toISOString().slice(0, 10),
+    doors: "19:00",
+    soundcheck: "17:00",
+    downbeat: "20:30",
+    status: "Hold",
+    advance: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const field = (name: keyof NewGigInput, value: string) =>
+    setForm((current) => ({ ...current, [name]: value }));
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const result = await onSave(form);
+    if (result) setError(result);
+    setBusy(false);
+  };
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-card" onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">NEW EVENT</p>
+            <h2>Add a gig</h2>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose}>
+            <X />
+          </button>
+        </div>
+        <label>
+          Gig title*
+          <input
+            required
+            value={form.title}
+            onChange={(event) => field("title", event.target.value)}
+            placeholder="Friday Night at The Foundry"
+          />
+        </label>
+        <div className="form-grid">
+          <label>
+            Venue*
+            <input
+              required
+              value={form.venue}
+              onChange={(event) => field("venue", event.target.value)}
+            />
+          </label>
+          <label>
+            Status
+            <select
+              value={form.status}
+              onChange={(event) => field("status", event.target.value)}
+            >
+              <option>Hold</option>
+              <option>Confirmed</option>
+              <option>Cancelled</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          Address
+          <input
+            value={form.address}
+            onChange={(event) => field("address", event.target.value)}
+          />
+        </label>
+        <div className="form-grid three">
+          <label>
+            Date*
+            <input
+              required
+              type="date"
+              value={form.date}
+              onChange={(event) => field("date", event.target.value)}
+            />
+          </label>
+          <label>
+            Soundcheck
+            <input
+              type="time"
+              value={form.soundcheck}
+              onChange={(event) => field("soundcheck", event.target.value)}
+            />
+          </label>
+          <label>
+            Downbeat*
+            <input
+              required
+              type="time"
+              value={form.downbeat}
+              onChange={(event) => field("downbeat", event.target.value)}
+            />
+          </label>
+        </div>
+        <label>
+          Venue advance notes
+          <textarea
+            value={form.advance}
+            onChange={(event) => field("advance", event.target.value)}
+          />
+        </label>
+        {error && <p className="auth-message error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary compact" disabled={busy}>
+            {busy ? "Saving..." : "Save gig"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 function Production({ gig, user }: { gig: Gig; user: User }) {

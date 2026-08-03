@@ -1318,6 +1318,75 @@ textarea {
   padding: 12px 18px;
   border-radius: 4px;
 }
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #080a08b8;
+  overflow-y: auto;
+}
+.modal-card {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: 28px;
+  border-radius: 8px;
+  background: #f8f7f2;
+  box-shadow: 0 28px 90px #0007;
+}
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.modal-head h2 {
+  margin: 0;
+  font-size: 1.8rem;
+}
+.modal-card label {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 16px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.modal-card input,
+.modal-card select,
+.modal-card textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: white;
+}
+.modal-card textarea {
+  min-height: 90px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 14px;
+}
+.form-grid.three {
+  grid-template-columns: repeat(3, 1fr);
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.modal-actions > button:first-child {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  padding: 11px 18px;
+}
 @media (max-width: 900px) {
   .login {
     grid-template-columns: 1fr;
@@ -1514,6 +1583,20 @@ textarea {
   }
   .stage-controls button {
     padding: 10px;
+  }
+  .modal-backdrop {
+    padding: 0;
+    align-items: end;
+  }
+  .modal-card {
+    max-height: 94vh;
+    padding: 22px 16px;
+    border-radius: 12px 12px 0 0;
+  }
+  .form-grid,
+  .form-grid.three {
+    grid-template-columns: 1fr;
+    gap: 0;
   }
   .quick-card {
     padding: 18px;
