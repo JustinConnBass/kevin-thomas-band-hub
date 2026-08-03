@@ -15,7 +15,6 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  Activity,
   ArrowLeft,
   BookOpen,
   CalendarDays,
@@ -55,8 +54,20 @@ type View =
   | "settings";
 type BandDataValue = {
   songs: Song[];
+  members: User[];
   saveNote: (songId: string, note: string) => Promise<void>;
+  addSong: (song: NewSongInput) => Promise<string | void>;
   addGig: (gig: NewGigInput) => Promise<string | void>;
+};
+type NewSongInput = {
+  title: string;
+  artist: string;
+  key: string;
+  bpm: string;
+  duration: string;
+  feel: string;
+  tags: string;
+  chart: string;
 };
 type NewGigInput = {
   title: string;
@@ -71,7 +82,9 @@ type NewGigInput = {
 };
 const BandDataContext = createContext<BandDataValue>({
   songs: seedSongs,
+  members: users,
   saveNote: async () => {},
+  addSong: async () => {},
   addGig: async () => {},
 });
 const useBandData = () => useContext(BandDataContext);
@@ -150,6 +163,23 @@ function Badge({
   tone?: string;
 }) {
   return <span className={`badge ${tone}`}>{children}</span>;
+}
+function EmptyState({
+  icon,
+  title,
+  message,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  message: string;
+}) {
+  return (
+    <div className="empty-state">
+      {icon}
+      <h1>{title}</h1>
+      <p>{message}</p>
+    </div>
+  );
 }
 function Login({
   onLogin,
@@ -298,8 +328,9 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(isSupabaseConfigured);
   const [view, setView] = useState<View>("home");
-  const [gigs, setGigs] = useState(seedGigs);
-  const [catalog, setCatalog] = useState(seedSongs);
+  const [gigs, setGigs] = useState(isSupabaseConfigured ? [] : seedGigs);
+  const [catalog, setCatalog] = useState(isSupabaseConfigured ? [] : seedSongs);
+  const [members, setMembers] = useState(isSupabaseConfigured ? [] : users);
   const [selectedGig, setSelectedGig] = useState<Gig | null>(null);
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
   const [stage, setStage] = useState(false);
@@ -325,6 +356,7 @@ export default function App() {
       setlistResult,
       availabilityResult,
       noteResult,
+      profileResult,
     ] = await Promise.all([
       client
         .from("songs")
@@ -345,6 +377,7 @@ export default function App() {
         .from("musician_notes")
         .select("song_id,note")
         .eq("user_id", userId),
+      client.from("profiles").select("id,name,role,instrument").order("name"),
     ]);
     const firstError = [
       songResult.error,
@@ -352,6 +385,7 @@ export default function App() {
       setlistResult.error,
       availabilityResult.error,
       noteResult.error,
+      profileResult.error,
     ].find(Boolean);
     if (firstError) throw firstError;
 
@@ -406,17 +440,29 @@ export default function App() {
       advance: row.advance || "",
       fee: financeMap.get(row.id),
     }));
-    if (nextSongs.length) setCatalog(nextSongs);
-    if (nextGigs.length) setGigs(nextGigs);
-    if (nextSongs.length && nextGigs.length) {
-      localStorage.setItem(
-        "ktb-offline-pack",
-        JSON.stringify({
-          songs: nextSongs.map((item) => ({ ...item, notes: "" })),
-          gigs: nextGigs.map((item) => ({ ...item, fee: undefined })),
-        }),
-      );
-    }
+    const nextMembers: User[] = (profileResult.data || []).map((row) => ({
+      id: row.id,
+      name: row.name,
+      email: "",
+      role: row.role,
+      instrument: row.instrument || "Band team",
+      initials: row.name
+        .split(/\s+/)
+        .map((part: string) => part[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase(),
+    }));
+    setCatalog(nextSongs);
+    setGigs(nextGigs);
+    setMembers(nextMembers);
+    localStorage.setItem(
+      "ktb-offline-pack",
+      JSON.stringify({
+        songs: nextSongs.map((item) => ({ ...item, notes: "" })),
+        gigs: nextGigs.map((item) => ({ ...item, fee: undefined })),
+      }),
+    );
   }, []);
 
   const loadProfile = useCallback(
@@ -630,6 +676,53 @@ export default function App() {
     if (error) return error.message;
     await loadBandData(user.role, user.id);
   };
+  const addSong = async (input: NewSongInput) => {
+    if (!user || !canEdit(user.role))
+      return "Only Administrators and Bandleaders can add songs.";
+    const bpm = Number(input.bpm);
+    const durationMatch = input.duration.trim().match(/^(\d+):([0-5]\d)$/);
+    if (!input.title.trim() || !input.artist.trim() || !input.key.trim())
+      return "Please complete the title, artist, and key.";
+    if (!Number.isInteger(bpm) || bpm < 30 || bpm > 300)
+      return "Enter a tempo between 30 and 300 BPM.";
+    if (input.duration.trim() && !durationMatch)
+      return "Enter the length as minutes:seconds, like 4:15.";
+    const durationSeconds = durationMatch
+      ? Number(durationMatch[1]) * 60 + Number(durationMatch[2])
+      : null;
+    const song: Song = {
+      id: crypto.randomUUID(),
+      title: input.title.trim(),
+      artist: input.artist.trim(),
+      key: input.key.trim(),
+      bpm,
+      duration: input.duration.trim() || "0:00",
+      feel: input.feel.trim(),
+      tags: input.tags
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+      chart: input.chart.trim(),
+      notes: "",
+    };
+    if (!supabase) {
+      setCatalog((items) => [...items, song]);
+      return;
+    }
+    const { error } = await supabase.from("songs").insert({
+      title: song.title,
+      artist: song.artist,
+      key: song.key,
+      bpm: song.bpm,
+      duration_seconds: durationSeconds,
+      feel: song.feel,
+      tags: song.tags,
+      chart: song.chart,
+      created_by: user.id,
+    });
+    if (error) return error.message;
+    await loadBandData(user.role, user.id);
+  };
 
   if (authLoading)
     return (
@@ -646,9 +739,12 @@ export default function App() {
     setSelectedGig(null);
     setSelectedSong(null);
   };
-  if (stage) return <StageMode gig={gig} onClose={() => setStage(false)} />;
+  if (stage && gig)
+    return <StageMode gig={gig} onClose={() => setStage(false)} />;
   return (
-    <BandDataContext.Provider value={{ songs: catalog, saveNote, addGig }}>
+    <BandDataContext.Provider
+      value={{ songs: catalog, members, saveNote, addSong, addGig }}
+    >
       <div className="app">
         <aside className={menu ? "open" : ""}>
           <div className="logo">
@@ -725,13 +821,21 @@ export default function App() {
                   setSelectedGig(g);
                   setStage(true);
                 }}
+                onSongs={() => setView("songs")}
               />
             )}
             {view === "songs" && (
               <Songs selected={selectedSong} onSelect={setSelectedSong} />
             )}{" "}
-            {view === "setlists" && (
+            {view === "setlists" && gig && (
               <Setlists gig={gig} onUpdate={updateSetlist} user={user} />
+            )}{" "}
+            {view === "setlists" && !gig && (
+              <EmptyState
+                icon={<SlidersHorizontal />}
+                title="No setlist yet"
+                message="Add a gig first, then build its setlist here."
+              />
             )}{" "}
             {view === "calendar" && (
               <Calendar
@@ -743,7 +847,14 @@ export default function App() {
                 onStage={() => setStage(true)}
               />
             )}{" "}
-            {view === "production" && <Production gig={gig} user={user} />}{" "}
+            {view === "production" && gig && <Production gig={gig} />}{" "}
+            {view === "production" && !gig && (
+              <EmptyState
+                icon={<Mic2 />}
+                title="No production files yet"
+                message="Add a gig before creating its production packet."
+              />
+            )}{" "}
             {view === "team" && <Team gigs={gigs} />}{" "}
             {view === "settings" && (
               <SettingsView user={user} onLogout={handleLogout} />
@@ -759,19 +870,39 @@ function Dashboard({
   gigs,
   onGig,
   onStage,
+  onSongs,
 }: {
   user: User;
   gigs: Gig[];
   onGig: (g: Gig) => void;
   onStage: (g: Gig) => void;
+  onSongs: () => void;
 }) {
-  const { songs } = useBandData();
+  const { songs, members } = useBandData();
   const next = gigs[0];
+  if (!next)
+    return (
+      <div className="empty-state">
+        <CalendarDays />
+        <h1>No gigs yet</h1>
+        <p>Open Calendar and add the band's first real gig.</p>
+      </div>
+    );
+  const confirmed = Object.values(next.availability).filter(
+    (answer) => answer === "available",
+  ).length;
+  const nextDate = new Date(`${next.date}T12:00:00`);
   return (
     <>
       <div className="welcome">
         <div>
-          <p className="eyebrow">MONDAY, AUGUST 3</p>
+          <p className="eyebrow">
+            {new Date().toLocaleDateString([], {
+              weekday: "long",
+              month: "long",
+              day: "numeric",
+            })}
+          </p>
           <h1>Good afternoon, {user.name.split(" ")[0]}.</h1>
           <p>Here’s what’s happening with the band.</p>
         </div>
@@ -782,22 +913,29 @@ function Dashboard({
       <div className="dashboard-grid">
         <article className="hero-gig">
           <div className="gig-top">
-            <Badge tone="lime">NEXT SHOW · 4 DAYS</Badge>
+            <Badge tone="lime">NEXT SHOW</Badge>
             <button className="icon-btn" onClick={() => onGig(next)}>
               <ChevronRight />
             </button>
           </div>
           <h2>{next.title}</h2>
           <p>
-            <CalendarDays /> Friday, August 7 · {next.downbeat}
+            <CalendarDays />{" "}
+            {nextDate.toLocaleDateString([], {
+              weekday: "long",
+              month: "long",
+              day: "numeric",
+            })}{" "}
+            - {next.downbeat}
           </p>
           <p>
-            <MapPin /> {next.venue} · Raleigh, NC
+            <MapPin /> {next.venue}
+            {next.address ? ` - ${next.address}` : ""}
           </p>
           <div className="schedule">
             <span>
-              <small>LOAD-IN</small>
-              <b>4:30 PM</b>
+              <small>{next.itinerary[0]?.label || "DOORS"}</small>
+              <b>{next.itinerary[0]?.time || next.doors}</b>
             </span>
             <span>
               <small>SOUNDCHECK</small>
@@ -810,11 +948,11 @@ function Dashboard({
           </div>
           <div className="availability">
             <div className="avatar-stack">
-              {users.slice(0, 4).map((u) => (
+              {members.slice(0, 4).map((u) => (
                 <span key={u.id}>{u.initials}</span>
               ))}
             </div>
-            <b>4 of 5 confirmed</b>
+            <b>{confirmed} confirmed</b>
             <span className="grow" />
             <button onClick={() => onGig(next)}>
               View gig details <ChevronRight />
@@ -843,7 +981,7 @@ function Dashboard({
             </span>
             <ChevronRight />
           </button>
-          <button>
+          <button onClick={onSongs}>
             <span className="quick-icon">
               <BookOpen />
             </span>
@@ -865,11 +1003,15 @@ function Dashboard({
         </button>
       </div>
       <div className="gig-list">
-        {gigs.map((g, i) => (
+        {gigs.map((g) => (
           <button key={g.id} onClick={() => onGig(g)}>
             <span className="date-block">
-              <b>{i ? "22" : "07"}</b>
-              <small>AUG</small>
+              <b>{new Date(`${g.date}T12:00:00`).getDate()}</b>
+              <small>
+                {new Date(`${g.date}T12:00:00`)
+                  .toLocaleDateString([], { month: "short" })
+                  .toUpperCase()}
+              </small>
             </span>
             <span className="grow">
               <b>{g.title}</b>
@@ -894,8 +1036,9 @@ function Songs({
   selected: Song | null;
   onSelect: (s: Song | null) => void;
 }) {
-  const { songs } = useBandData();
+  const { songs, addSong } = useBandData();
   const [q, setQ] = useState("");
+  const [showAddSong, setShowAddSong] = useState(false);
   const filtered = songs.filter((s) =>
     (s.title + s.artist + s.tags.join(" "))
       .toLowerCase()
@@ -911,7 +1054,10 @@ function Songs({
           <h1>Song library</h1>
           <p>{songs.length} songs · charts cached for offline use</p>
         </div>
-        <button className="primary compact">
+        <button
+          className="primary compact"
+          onClick={() => setShowAddSong(true)}
+        >
           <Plus /> Add song
         </button>
       </div>
@@ -928,34 +1074,184 @@ function Songs({
           <SlidersHorizontal /> Filter
         </button>
       </div>
-      <div className="table songs-table">
-        <div className="thead">
-          <span>SONG</span>
-          <span>KEY</span>
-          <span>TEMPO</span>
-          <span>TAGS</span>
-          <span />
+      {filtered.length ? (
+        <div className="table songs-table">
+          <div className="thead">
+            <span>SONG</span>
+            <span>KEY</span>
+            <span>TEMPO</span>
+            <span>TAGS</span>
+            <span />
+          </div>
+          {filtered.map((s) => (
+            <button className="trow" key={s.id} onClick={() => onSelect(s)}>
+              <span>
+                <b>{s.title}</b>
+                <small>{s.artist}</small>
+              </span>
+              <span>
+                <Badge>{s.key}</Badge>
+              </span>
+              <span>{s.bpm} BPM</span>
+              <span>
+                {s.tags.map((t) => (
+                  <Badge key={t}>{t}</Badge>
+                ))}
+              </span>
+              <ChevronRight />
+            </button>
+          ))}
         </div>
-        {filtered.map((s) => (
-          <button className="trow" key={s.id} onClick={() => onSelect(s)}>
-            <span>
-              <b>{s.title}</b>
-              <small>{s.artist}</small>
-            </span>
-            <span>
-              <Badge>{s.key}</Badge>
-            </span>
-            <span>{s.bpm} BPM</span>
-            <span>
-              {s.tags.map((t) => (
-                <Badge key={t}>{t}</Badge>
-              ))}
-            </span>
-            <ChevronRight />
-          </button>
-        ))}
-      </div>
+      ) : (
+        <EmptyState
+          icon={<Music2 />}
+          title={songs.length ? "No matching songs" : "No songs yet"}
+          message={
+            songs.length
+              ? "Try a different search."
+              : "Use Add song to create the band's first real chart."
+          }
+        />
+      )}
+      {showAddSong && (
+        <SongForm
+          onClose={() => setShowAddSong(false)}
+          onSave={async (input) => {
+            const error = await addSong(input);
+            if (!error) setShowAddSong(false);
+            return error;
+          }}
+        />
+      )}
     </>
+  );
+}
+function SongForm({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (song: NewSongInput) => Promise<string | void>;
+}) {
+  const [form, setForm] = useState<NewSongInput>({
+    title: "",
+    artist: "",
+    key: "",
+    bpm: "",
+    duration: "",
+    feel: "",
+    tags: "",
+    chart: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const field = (name: keyof NewSongInput, value: string) =>
+    setForm((current) => ({ ...current, [name]: value }));
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const result = await onSave(form);
+    if (result) setError(result);
+    setBusy(false);
+  };
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-card" onSubmit={submit}>
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">SONG LIBRARY</p>
+            <h2>Add a song</h2>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose}>
+            <X />
+          </button>
+        </div>
+        <div className="form-grid">
+          <label>
+            Song title*
+            <input
+              required
+              value={form.title}
+              onChange={(event) => field("title", event.target.value)}
+            />
+          </label>
+          <label>
+            Artist*
+            <input
+              required
+              value={form.artist}
+              onChange={(event) => field("artist", event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="form-grid three">
+          <label>
+            Key*
+            <input
+              required
+              value={form.key}
+              onChange={(event) => field("key", event.target.value)}
+              placeholder="G or Am"
+            />
+          </label>
+          <label>
+            Tempo (BPM)*
+            <input
+              required
+              type="number"
+              min="30"
+              max="300"
+              value={form.bpm}
+              onChange={(event) => field("bpm", event.target.value)}
+            />
+          </label>
+          <label>
+            Length
+            <input
+              value={form.duration}
+              onChange={(event) => field("duration", event.target.value)}
+              placeholder="4:15"
+            />
+          </label>
+        </div>
+        <div className="form-grid">
+          <label>
+            Feel
+            <input
+              value={form.feel}
+              onChange={(event) => field("feel", event.target.value)}
+              placeholder="Medium shuffle"
+            />
+          </label>
+          <label>
+            Tags
+            <input
+              value={form.tags}
+              onChange={(event) => field("tags", event.target.value)}
+              placeholder="Cover, Dance, Opener"
+            />
+          </label>
+        </div>
+        <label>
+          Nashville Number chart
+          <textarea
+            value={form.chart}
+            onChange={(event) => field("chart", event.target.value)}
+            placeholder="V | 1 . . . | 4 . . . | 5 . . . | 1 . . . |"
+          />
+        </label>
+        {error && <p className="auth-message error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary compact" disabled={busy}>
+            {busy ? "Saving..." : "Save song"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 function SongDetail({ song, onBack }: { song: Song; onBack: () => void }) {
@@ -1015,7 +1311,18 @@ function Setlists({
 }) {
   const { songs } = useBandData();
   const [query, setQuery] = useState("");
-  const ids = gig.setlist;
+  const ids = gig.setlist.filter((id) =>
+    songs.some((songItem) => songItem.id === id),
+  );
+  const setMinutes = Math.round(
+    ids.reduce((total, id) => {
+      const duration = songs.find((songItem) => songItem.id === id)?.duration;
+      const [minutes = 0, seconds = 0] = (duration || "0:00")
+        .split(":")
+        .map(Number);
+      return total + minutes + seconds / 60;
+    }, 0),
+  );
   const update = (next: string[]) => onUpdate(gig.id, next);
   const onDragEnd = ({ active, over }: DragEndEvent) => {
     if (over && active.id !== over.id) {
@@ -1080,12 +1387,17 @@ function Setlists({
                 <Plus />
               </button>
             ))}
+          {!songs.length && (
+            <p className="notice">Add songs in the Songs screen first.</p>
+          )}
         </section>
         <section className="set-pane">
           <div className="card-head">
             <div>
               <b>Set 1</b>
-              <small>{ids.length} songs · approx. 48 min</small>
+              <small>
+                {ids.length} songs - approx. {setMinutes} min
+              </small>
             </div>
             <Badge tone="lime">DRAG TO REORDER</Badge>
           </div>
@@ -1100,16 +1412,19 @@ function Setlists({
             onDragEnd={canEdit(user.role) ? onDragEnd : () => {}}
           >
             <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-              {ids.map((id, i) => (
-                <SortableSong
-                  key={id}
-                  index={i}
-                  song={songs.find((s) => s.id === id)!}
-                  onRemove={() =>
-                    canEdit(user.role) && update(ids.filter((x) => x !== id))
-                  }
-                />
-              ))}
+              {ids.map((id, i) => {
+                const songItem = songs.find((song) => song.id === id);
+                return songItem ? (
+                  <SortableSong
+                    key={id}
+                    index={i}
+                    song={songItem}
+                    onRemove={() =>
+                      canEdit(user.role) && update(ids.filter((x) => x !== id))
+                    }
+                  />
+                ) : null;
+              })}
             </SortableContext>
           </DndContext>
         </section>
@@ -1134,6 +1449,18 @@ function Calendar({
 }) {
   const { songs, addGig } = useBandData();
   const [showAddGig, setShowAddGig] = useState(false);
+  const calendarDate = gigs[0]
+    ? new Date(`${gigs[0].date}T12:00:00`)
+    : new Date();
+  const weekStart = new Date(calendarDate);
+  weekStart.setDate(calendarDate.getDate() - ((calendarDate.getDay() + 6) % 7));
+  const weekDays = Array.from({ length: 7 }, (_, index) => {
+    const day = new Date(weekStart);
+    day.setDate(weekStart.getDate() + index);
+    return day;
+  });
+  const localDateKey = (date: Date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   if (!gig)
     return (
       <>
@@ -1152,37 +1479,57 @@ function Calendar({
           </button>
         </div>
         <div className="calendar-strip">
-          <b>AUGUST 2026</b>
+          <b>
+            {calendarDate
+              .toLocaleDateString([], { month: "long", year: "numeric" })
+              .toUpperCase()}
+          </b>
           <div>
-            {[3, 4, 5, 6, 7, 8, 9].map((d) => (
-              <span className={d === 7 ? "showday" : ""} key={d}>
+            {weekDays.map((day) => (
+              <span
+                className={
+                  gigs.some((gigItem) => gigItem.date === localDateKey(day))
+                    ? "showday"
+                    : ""
+                }
+                key={localDateKey(day)}
+              >
                 <small>
-                  {["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"][d - 3]}
+                  {day
+                    .toLocaleDateString([], { weekday: "short" })
+                    .toUpperCase()}
                 </small>
-                <b>{d}</b>
+                <b>{day.getDate()}</b>
               </span>
             ))}
           </div>
         </div>
         <div className="gig-list">
-          {gigs.map((g) => (
-            <button key={g.id} onClick={() => onSelect(g)}>
-              <span className="date-block">
-                <b>{g.date.slice(-2)}</b>
-                <small>AUG</small>
-              </span>
-              <span className="grow">
-                <b>{g.title}</b>
-                <small>
-                  <MapPin /> {g.venue} · {g.downbeat}
-                </small>
-              </span>
-              <Badge tone={g.status === "Confirmed" ? "success" : "warning"}>
-                {g.status}
-              </Badge>
-              <ChevronRight />
-            </button>
-          ))}
+          {gigs.map((g) => {
+            const gigDate = new Date(`${g.date}T12:00:00`);
+            return (
+              <button key={g.id} onClick={() => onSelect(g)}>
+                <span className="date-block">
+                  <b>{gigDate.getDate()}</b>
+                  <small>
+                    {gigDate
+                      .toLocaleDateString([], { month: "short" })
+                      .toUpperCase()}
+                  </small>
+                </span>
+                <span className="grow">
+                  <b>{g.title}</b>
+                  <small>
+                    <MapPin /> {g.venue} · {g.downbeat}
+                  </small>
+                </span>
+                <Badge tone={g.status === "Confirmed" ? "success" : "warning"}>
+                  {g.status}
+                </Badge>
+                <ChevronRight />
+              </button>
+            );
+          })}
         </div>
         {showAddGig && (
           <GigForm
@@ -1408,7 +1755,7 @@ function GigForm({
     </div>
   );
 }
-function Production({ gig, user }: { gig: Gig; user: User }) {
+function Production({ gig }: { gig: Gig }) {
   const { songs } = useBandData();
   return (
     <>
@@ -1418,49 +1765,8 @@ function Production({ gig, user }: { gig: Gig; user: User }) {
           <h1>Production</h1>
           <p>Stage plots, inputs and venue advances.</p>
         </div>
-        <button className="primary compact">
-          <Plus /> Upload file
-        </button>
       </div>
       <div className="production-grid">
-        <article>
-          <div className="file-preview stageplot">
-            <span>
-              DRUMS<small>SR</small>
-            </span>
-            <span>
-              KEYS<small>JE</small>
-            </span>
-            <span>
-              VOCAL / GTR<small>KT</small>
-            </span>
-            <span>
-              BASS<small>MB</small>
-            </span>
-          </div>
-          <h3>Standard 5-piece stage plot</h3>
-          <p>Updated Jul 28 · PDF</p>
-          <button>
-            <Download /> Download
-          </button>
-        </article>
-        <article>
-          <div className="file-preview inputlist">
-            <b>INPUT LIST / 16 CH</b>
-            {["Kick", "Snare", "Bass DI", "Guitar", "Keys L/R", "Vocal 1"].map(
-              (x, i) => (
-                <span key={x}>
-                  {String(i + 1).padStart(2, "0")} — {x}
-                </span>
-              ),
-            )}
-          </div>
-          <h3>Festival input list</h3>
-          <p>Updated Jul 28 · PDF</p>
-          <button>
-            <Download /> Download
-          </button>
-        </article>
         <article>
           <div className="file-preview advance">
             <MapPin />
@@ -1473,26 +1779,17 @@ function Production({ gig, user }: { gig: Gig; user: User }) {
             <Download /> Generate PDF
           </button>
         </article>
-      </div>
-      <div className="audit">
-        <div className="card-head">
-          <b>Recent activity</b>
-          <Activity />
-        </div>
-        <p>
-          <span className="avatar">KT</span>
-          <b>Kevin</b> reordered the setlist <small>Today, 2:14 PM</small>
-        </p>
-        <p>
-          <span className="avatar">{user.initials}</span>
-          <b>{user.name.split(" ")[0]}</b> viewed the venue advance{" "}
-          <small>Just now</small>
-        </p>
+        <EmptyState
+          icon={<Mic2 />}
+          title="No uploaded production files"
+          message="Your real stage plots and input lists will appear here after they are uploaded."
+        />
       </div>
     </>
   );
 }
 function Team({ gigs }: { gigs: Gig[] }) {
+  const { members } = useBandData();
   return (
     <>
       <div className="page-title">
@@ -1506,7 +1803,7 @@ function Team({ gigs }: { gigs: Gig[] }) {
         </button>
       </div>
       <div className="team-grid">
-        {users.map((u) => (
+        {members.map((u) => (
           <article key={u.id}>
             <span className="avatar big">{u.initials}</span>
             <div>
@@ -1514,7 +1811,9 @@ function Team({ gigs }: { gigs: Gig[] }) {
               <p>{u.instrument}</p>
               <Badge>{u.role}</Badge>
             </div>
-            <div className={`dot ${gigs[0].availability[u.id]}`} />
+            <div
+              className={`dot ${gigs[0]?.availability[u.id] || "pending"}`}
+            />
           </article>
         ))}
       </div>
@@ -1568,10 +1867,29 @@ function StageMode({ gig, onClose }: { gig: Gig; onClose: () => void }) {
   const { songs } = useBandData();
   const [index, setIndex] = useState(0);
   const list = useMemo(
-    () => gig.setlist.map((id) => songs.find((s) => s.id === id)!),
+    () =>
+      gig.setlist
+        .map((id) => songs.find((songItem) => songItem.id === id))
+        .filter((songItem): songItem is Song => Boolean(songItem)),
     [gig, songs],
   );
   const song = list[index];
+  if (!song)
+    return (
+      <div className="stage-mode stage-empty">
+        <header>
+          <button onClick={onClose}>
+            <X /> Exit stage mode
+          </button>
+          <b>{gig.title}</b>
+        </header>
+        <EmptyState
+          icon={<Music2 />}
+          title="This setlist is empty"
+          message="Exit stage mode, add songs to the setlist, and try again."
+        />
+      </div>
+    );
   return (
     <div className="stage-mode">
       <header>
