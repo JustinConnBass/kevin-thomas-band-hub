@@ -1,0 +1,3 @@
+import {render,screen,fireEvent} from '@testing-library/react';import {describe,expect,it,vi} from 'vitest';import App from '../App';
+vi.mock('virtual:pwa-register',()=>({registerSW:vi.fn()}));
+describe('Band Hub',()=>{it('signs into the fictional demo and shows the next gig',()=>{render(<App/>);fireEvent.click(screen.getByRole('button',{name:/Bandleader/i}));expect(screen.getByText(/Good afternoon, Kevin/i)).toBeInTheDocument();expect(screen.getAllByText(/Friday Night at The Foundry/i).length).toBeGreaterThan(0)});it('supports password-reset view',()=>{render(<App/>);fireEvent.click(screen.getByText(/Forgot password/i));expect(screen.getByText(/Reset your password/i)).toBeInTheDocument()})});
