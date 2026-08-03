@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { DndContext, closestCenter, type DragEndEvent } from "@dnd-kit/core";
 import {
   arrayMove,
@@ -34,7 +41,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { gigs as seedGigs, songs, users } from "./data";
+import { gigs as seedGigs, songs as seedSongs, users } from "./data";
 import { canEdit, canSeeFinance, exportGigPdf } from "./lib";
 import type { Availability, Gig, Song, User } from "./types";
 import { isSupabaseConfigured, supabase } from "./supabase";
@@ -46,6 +53,26 @@ type View =
   | "production"
   | "team"
   | "settings";
+type BandDataValue = {
+  songs: Song[];
+  saveNote: (songId: string, note: string) => Promise<void>;
+};
+const BandDataContext = createContext<BandDataValue>({
+  songs: seedSongs,
+  saveNote: async () => {},
+});
+const useBandData = () => useContext(BandDataContext);
+const formatDuration = (seconds: number | null) => {
+  const value = seconds || 0;
+  return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
+};
+const formatTime = (value: string | null) =>
+  value
+    ? new Date(value).toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : "—";
 const nav = [
   ["home", "Home", Home],
   ["songs", "Songs", Music2],
@@ -259,6 +286,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(isSupabaseConfigured);
   const [view, setView] = useState<View>("home");
   const [gigs, setGigs] = useState(seedGigs);
+  const [catalog, setCatalog] = useState(seedSongs);
   const [selectedGig, setSelectedGig] = useState<Gig | null>(null);
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
   const [stage, setStage] = useState(false);
@@ -275,32 +303,139 @@ export default function App() {
     };
   }, []);
 
-  const loadProfile = useCallback(async (id: string, email = "") => {
-    if (!supabase) return;
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("id,name,role,instrument")
-      .eq("id", id)
-      .single();
-    if (error)
-      throw new Error(
-        "Your login works, but your band profile has not been added yet.",
+  const loadBandData = useCallback(async (role: string, userId: string) => {
+    const client = supabase;
+    if (!client) return;
+    const [
+      songResult,
+      gigResult,
+      setlistResult,
+      availabilityResult,
+      noteResult,
+    ] = await Promise.all([
+      client
+        .from("songs")
+        .select("id,title,artist,key,bpm,duration_seconds,feel,tags,chart")
+        .order("title"),
+      client
+        .from("gigs")
+        .select(
+          "id,title,venue,address,starts_at,doors_at,soundcheck_at,itinerary,advance,status",
+        )
+        .order("starts_at"),
+      client
+        .from("setlist_items")
+        .select("gig_id,song_id,position")
+        .order("position"),
+      client.from("availability").select("gig_id,user_id,response"),
+      client
+        .from("musician_notes")
+        .select("song_id,note")
+        .eq("user_id", userId),
+    ]);
+    const firstError = [
+      songResult.error,
+      gigResult.error,
+      setlistResult.error,
+      availabilityResult.error,
+      noteResult.error,
+    ].find(Boolean);
+    if (firstError) throw firstError;
+
+    const noteMap = new Map(
+      (noteResult.data || []).map((row) => [row.song_id, row.note || ""]),
+    );
+    const nextSongs: Song[] = (songResult.data || []).map((row) => ({
+      id: row.id,
+      title: row.title,
+      artist: row.artist,
+      key: row.key,
+      bpm: row.bpm,
+      duration: formatDuration(row.duration_seconds),
+      feel: row.feel || "",
+      tags: row.tags || [],
+      chart: row.chart || "",
+      notes: noteMap.get(row.id) || "",
+    }));
+
+    const financeMap = new Map<string, number>();
+    if (role === "Administrator") {
+      await Promise.all(
+        (gigResult.data || []).map(async (row) => {
+          const { data } = await client.rpc("get_gig_finance", {
+            gig_uuid: row.id,
+          });
+          const cents = data?.[0]?.fee_cents;
+          if (typeof cents === "number") financeMap.set(row.id, cents / 100);
+        }),
       );
-    const name = data.name || email.split("@")[0];
-    setUser({
-      id: data.id,
-      name,
-      email,
-      role: data.role,
-      instrument: data.instrument || "",
-      initials: name
-        .split(/\s+/)
-        .map((part: string) => part[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase(),
-    });
+    }
+    const nextGigs: Gig[] = (gigResult.data || []).map((row) => ({
+      id: row.id,
+      title: row.title,
+      venue: row.venue,
+      address: row.address || "",
+      date: row.starts_at.slice(0, 10),
+      doors: formatTime(row.doors_at),
+      soundcheck: formatTime(row.soundcheck_at),
+      downbeat: formatTime(row.starts_at),
+      status: row.status || "Hold",
+      setlist: (setlistResult.data || [])
+        .filter((item) => item.gig_id === row.id)
+        .sort((a, b) => a.position - b.position)
+        .map((item) => item.song_id),
+      availability: Object.fromEntries(
+        (availabilityResult.data || [])
+          .filter((item) => item.gig_id === row.id)
+          .map((item) => [item.user_id, item.response]),
+      ),
+      itinerary: Array.isArray(row.itinerary) ? row.itinerary : [],
+      advance: row.advance || "",
+      fee: financeMap.get(row.id),
+    }));
+    if (nextSongs.length) setCatalog(nextSongs);
+    if (nextGigs.length) setGigs(nextGigs);
+    if (nextSongs.length && nextGigs.length) {
+      localStorage.setItem(
+        "ktb-offline-pack",
+        JSON.stringify({
+          songs: nextSongs.map((item) => ({ ...item, notes: "" })),
+          gigs: nextGigs.map((item) => ({ ...item, fee: undefined })),
+        }),
+      );
+    }
   }, []);
+
+  const loadProfile = useCallback(
+    async (id: string, email = "") => {
+      if (!supabase) return;
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("id,name,role,instrument")
+        .eq("id", id)
+        .single();
+      if (error)
+        throw new Error(
+          "Your login works, but your band profile has not been added yet.",
+        );
+      const name = data.name || email.split("@")[0];
+      setUser({
+        id: data.id,
+        name,
+        email,
+        role: data.role,
+        instrument: data.instrument || "",
+        initials: name
+          .split(/\s+/)
+          .map((part: string) => part[0])
+          .join("")
+          .slice(0, 2)
+          .toUpperCase(),
+      });
+      await loadBandData(data.role, data.id);
+    },
+    [loadBandData],
+  );
 
   useEffect(() => {
     const client = supabase;
@@ -372,6 +507,70 @@ export default function App() {
     if (supabase) await supabase.auth.signOut();
     setUser(null);
   };
+  const saveNote = useCallback(
+    async (songId: string, note: string) => {
+      if (!supabase || !user) return;
+      const { error } = await supabase.from("musician_notes").upsert(
+        {
+          song_id: songId,
+          user_id: user.id,
+          note,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "song_id,user_id" },
+      );
+      if (!error)
+        setCatalog((items) =>
+          items.map((item) =>
+            item.id === songId ? { ...item, notes: note } : item,
+          ),
+        );
+    },
+    [user],
+  );
+  const updateSetlist = async (gigId: string, songIds: string[]) => {
+    setGigs((items) =>
+      items.map((item) =>
+        item.id === gigId ? { ...item, setlist: songIds } : item,
+      ),
+    );
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("setlist_items")
+      .delete()
+      .eq("gig_id", gigId);
+    if (!error && songIds.length)
+      await supabase.from("setlist_items").insert(
+        songIds.map((songId, index) => ({
+          gig_id: gigId,
+          song_id: songId,
+          position: index + 1,
+        })),
+      );
+  };
+  const updateAvailability = async (gigId: string, response: Availability) => {
+    if (!user) return;
+    setGigs((items) =>
+      items.map((item) =>
+        item.id === gigId
+          ? {
+              ...item,
+              availability: { ...item.availability, [user.id]: response },
+            }
+          : item,
+      ),
+    );
+    if (supabase)
+      await supabase.from("availability").upsert(
+        {
+          gig_id: gigId,
+          user_id: user.id,
+          response,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "gig_id,user_id" },
+      );
+  };
 
   if (authLoading)
     return (
@@ -390,119 +589,110 @@ export default function App() {
   };
   if (stage) return <StageMode gig={gig} onClose={() => setStage(false)} />;
   return (
-    <div className="app">
-      <aside className={menu ? "open" : ""}>
-        <div className="logo">
-          <div className="brandmark small">KT</div>
-          <div>
-            <b>KTB HUB</b>
-            <span>Band operations</span>
-          </div>
-          <button
-            className="icon-btn close-menu"
-            onClick={() => setMenu(false)}
-          >
-            <X />
-          </button>
-        </div>
-        <nav>
-          {nav.map(([id, label, Icon]) => (
+    <BandDataContext.Provider value={{ songs: catalog, saveNote }}>
+      <div className="app">
+        <aside className={menu ? "open" : ""}>
+          <div className="logo">
+            <div className="brandmark small">KT</div>
+            <div>
+              <b>KTB HUB</b>
+              <span>Band operations</span>
+            </div>
             <button
-              key={id}
-              className={view === id ? "active" : ""}
-              onClick={() => selectView(id)}
+              className="icon-btn close-menu"
+              onClick={() => setMenu(false)}
             >
-              <Icon />
-              {label}
+              <X />
             </button>
-          ))}
-        </nav>
-        <div className="side-bottom">
-          <div className="sync">
-            {online ? <Cloud /> : <CloudOff />}
-            <span>
-              <b>{online ? "All changes synced" : "Working offline"}</b>
-              <small>{online ? "Just now" : "Will sync on reconnect"}</small>
-            </span>
           </div>
-          <button className="profile" onClick={() => setView("settings")}>
-            <span className="avatar">{user.initials}</span>
-            <span>
-              <b>{user.name}</b>
-              <small>{user.role}</small>
-            </span>
-            <Settings />
-          </button>
-        </div>
-      </aside>
-      {menu && <button className="scrim" onClick={() => setMenu(false)} />}
-      <section className="main">
-        <header>
-          <button className="icon-btn menu-btn" onClick={() => setMenu(true)}>
-            <Menu />
-          </button>
-          <div>
-            <p className="eyebrow">KEVIN THOMAS BAND</p>
-            <b>{nav.find((x) => x[0] === view)?.[1] || "Hub"}</b>
-          </div>
-          <div className="header-actions">
-            <Badge tone={online ? "success" : "warning"}>
+          <nav>
+            {nav.map(([id, label, Icon]) => (
+              <button
+                key={id}
+                className={view === id ? "active" : ""}
+                onClick={() => selectView(id)}
+              >
+                <Icon />
+                {label}
+              </button>
+            ))}
+          </nav>
+          <div className="side-bottom">
+            <div className="sync">
               {online ? <Cloud /> : <CloudOff />}
-              {online ? "Synced" : "Offline"}
-            </Badge>
-            <button className="avatar">{user.initials}</button>
+              <span>
+                <b>{online ? "All changes synced" : "Working offline"}</b>
+                <small>{online ? "Just now" : "Will sync on reconnect"}</small>
+              </span>
+            </div>
+            <button className="profile" onClick={() => setView("settings")}>
+              <span className="avatar">{user.initials}</span>
+              <span>
+                <b>{user.name}</b>
+                <small>{user.role}</small>
+              </span>
+              <Settings />
+            </button>
           </div>
-        </header>
-        <div className="content">
-          {view === "home" && (
-            <Dashboard
-              user={user}
-              gigs={gigs}
-              onGig={(g) => {
-                setSelectedGig(g);
-                setView("calendar");
-              }}
-              onStage={(g) => {
-                setSelectedGig(g);
-                setStage(true);
-              }}
-            />
-          )}
-          {view === "songs" && (
-            <Songs selected={selectedSong} onSelect={setSelectedSong} />
-          )}{" "}
-          {view === "setlists" && (
-            <Setlists gig={gig} setGigs={setGigs} user={user} />
-          )}{" "}
-          {view === "calendar" && (
-            <Calendar
-              gig={selectedGig}
-              gigs={gigs}
-              user={user}
-              onSelect={setSelectedGig}
-              onAvailability={(id, a) =>
-                setGigs((gs) =>
-                  gs.map((g) =>
-                    g.id === id
-                      ? {
-                          ...g,
-                          availability: { ...g.availability, [user.id]: a },
-                        }
-                      : g,
-                  ),
-                )
-              }
-              onStage={() => setStage(true)}
-            />
-          )}{" "}
-          {view === "production" && <Production gig={gig} user={user} />}{" "}
-          {view === "team" && <Team gigs={gigs} />}{" "}
-          {view === "settings" && (
-            <SettingsView user={user} onLogout={handleLogout} />
-          )}
-        </div>
-      </section>
-    </div>
+        </aside>
+        {menu && <button className="scrim" onClick={() => setMenu(false)} />}
+        <section className="main">
+          <header>
+            <button className="icon-btn menu-btn" onClick={() => setMenu(true)}>
+              <Menu />
+            </button>
+            <div>
+              <p className="eyebrow">KEVIN THOMAS BAND</p>
+              <b>{nav.find((x) => x[0] === view)?.[1] || "Hub"}</b>
+            </div>
+            <div className="header-actions">
+              <Badge tone={online ? "success" : "warning"}>
+                {online ? <Cloud /> : <CloudOff />}
+                {online ? "Synced" : "Offline"}
+              </Badge>
+              <button className="avatar">{user.initials}</button>
+            </div>
+          </header>
+          <div className="content">
+            {view === "home" && (
+              <Dashboard
+                user={user}
+                gigs={gigs}
+                onGig={(g) => {
+                  setSelectedGig(g);
+                  setView("calendar");
+                }}
+                onStage={(g) => {
+                  setSelectedGig(g);
+                  setStage(true);
+                }}
+              />
+            )}
+            {view === "songs" && (
+              <Songs selected={selectedSong} onSelect={setSelectedSong} />
+            )}{" "}
+            {view === "setlists" && (
+              <Setlists gig={gig} onUpdate={updateSetlist} user={user} />
+            )}{" "}
+            {view === "calendar" && (
+              <Calendar
+                gig={selectedGig}
+                gigs={gigs}
+                user={user}
+                onSelect={setSelectedGig}
+                onAvailability={updateAvailability}
+                onStage={() => setStage(true)}
+              />
+            )}{" "}
+            {view === "production" && <Production gig={gig} user={user} />}{" "}
+            {view === "team" && <Team gigs={gigs} />}{" "}
+            {view === "settings" && (
+              <SettingsView user={user} onLogout={handleLogout} />
+            )}
+          </div>
+        </section>
+      </div>
+    </BandDataContext.Provider>
   );
 }
 function Dashboard({
@@ -516,6 +706,7 @@ function Dashboard({
   onGig: (g: Gig) => void;
   onStage: (g: Gig) => void;
 }) {
+  const { songs } = useBandData();
   const next = gigs[0];
   return (
     <>
@@ -644,6 +835,7 @@ function Songs({
   selected: Song | null;
   onSelect: (s: Song | null) => void;
 }) {
+  const { songs } = useBandData();
   const [q, setQ] = useState("");
   const filtered = songs.filter((s) =>
     (s.title + s.artist + s.tags.join(" "))
@@ -708,6 +900,7 @@ function Songs({
   );
 }
 function SongDetail({ song, onBack }: { song: Song; onBack: () => void }) {
+  const { saveNote } = useBandData();
   return (
     <>
       <button className="backlink" onClick={onBack}>
@@ -740,7 +933,10 @@ function SongDetail({ song, onBack }: { song: Song; onBack: () => void }) {
             <b>My musician notes</b>
             <Badge tone="success">PRIVATE</Badge>
           </div>
-          <textarea defaultValue={song.notes} />
+          <textarea
+            defaultValue={song.notes}
+            onBlur={(event) => saveNote(song.id, event.target.value)}
+          />
           <p className="hint">
             <ShieldCheck /> Only you can see these notes.
           </p>
@@ -751,19 +947,17 @@ function SongDetail({ song, onBack }: { song: Song; onBack: () => void }) {
 }
 function Setlists({
   gig,
-  setGigs,
+  onUpdate,
   user,
 }: {
   gig: Gig;
-  setGigs: React.Dispatch<React.SetStateAction<Gig[]>>;
+  onUpdate: (gigId: string, songIds: string[]) => void;
   user: User;
 }) {
+  const { songs } = useBandData();
   const [query, setQuery] = useState("");
   const ids = gig.setlist;
-  const update = (next: string[]) =>
-    setGigs((gs) =>
-      gs.map((g) => (g.id === gig.id ? { ...g, setlist: next } : g)),
-    );
+  const update = (next: string[]) => onUpdate(gig.id, next);
   const onDragEnd = ({ active, over }: DragEndEvent) => {
     if (over && active.id !== over.id) {
       update(
@@ -879,6 +1073,7 @@ function Calendar({
   onAvailability: (id: string, a: Availability) => void;
   onStage: () => void;
 }) {
+  const { songs } = useBandData();
   if (!gig)
     return (
       <>
@@ -1013,6 +1208,7 @@ function Calendar({
   );
 }
 function Production({ gig, user }: { gig: Gig; user: User }) {
+  const { songs } = useBandData();
   return (
     <>
       <div className="page-title">
@@ -1144,6 +1340,7 @@ function SettingsView({
         <span className="avatar big">{user.initials}</span>
         <div className="grow">
           <h2>{user.name}</h2>
+          <p>{user.instrument || "Band team"}</p>
           <p>{user.email}</p>
           <Badge>{user.role}</Badge>
         </div>
@@ -1167,10 +1364,11 @@ function SettingsView({
   );
 }
 function StageMode({ gig, onClose }: { gig: Gig; onClose: () => void }) {
+  const { songs } = useBandData();
   const [index, setIndex] = useState(0);
   const list = useMemo(
     () => gig.setlist.map((id) => songs.find((s) => s.id === id)!),
-    [gig],
+    [gig, songs],
   );
   const song = list[index];
   return (
