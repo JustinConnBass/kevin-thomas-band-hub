@@ -534,6 +534,9 @@ export default function App() {
         item.id === gigId ? { ...item, setlist: songIds } : item,
       ),
     );
+    setSelectedGig((item) =>
+      item?.id === gigId ? { ...item, setlist: songIds } : item,
+    );
     if (!supabase) return;
     const { error } = await supabase
       .from("setlist_items")
@@ -559,6 +562,14 @@ export default function App() {
             }
           : item,
       ),
+    );
+    setSelectedGig((item) =>
+      item?.id === gigId
+        ? {
+            ...item,
+            availability: { ...item.availability, [user.id]: response },
+          }
+        : item,
     );
     if (supabase)
       await supabase.from("availability").upsert(
