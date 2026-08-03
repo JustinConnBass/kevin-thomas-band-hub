@@ -51,3 +51,4 @@ Choose any fictional role on the sign-in screen. The demo password field is deli
 ## Low-cost hosting
 
 Normal use by fewer than 15 members should fit free static hosting and Supabase's free tier. Upgrade only when guaranteed daily backups, higher storage, or non-pausing service is needed. A custom domain is the likely annual cost.
+Deployment configured for Cloudflare Workers.
