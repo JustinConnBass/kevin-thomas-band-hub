@@ -31,11 +31,13 @@ import {
   Menu,
   Mic2,
   Music2,
+  Pencil,
   Plus,
   Search,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   Users,
   X,
   Zap,
@@ -58,6 +60,8 @@ type BandDataValue = {
   saveNote: (songId: string, note: string) => Promise<void>;
   addSong: (song: NewSongInput) => Promise<string | void>;
   addGig: (gig: NewGigInput) => Promise<string | void>;
+  updateGig: (gigId: string, gig: NewGigInput) => Promise<string | void>;
+  deleteGig: (gigId: string) => Promise<string | void>;
 };
 type NewSongInput = {
   title: string;
@@ -86,6 +90,8 @@ const BandDataContext = createContext<BandDataValue>({
   saveNote: async () => {},
   addSong: async () => {},
   addGig: async () => {},
+  updateGig: async () => {},
+  deleteGig: async () => {},
 });
 const useBandData = () => useContext(BandDataContext);
 const formatDuration = (seconds: number | null) => {
@@ -99,6 +105,34 @@ const formatTime = (value: string | null) =>
         minute: "2-digit",
       })
     : "—";
+const localDateKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const toTimeInput = (value: string) => {
+  if (/^\d{2}:\d{2}$/.test(value)) return value;
+  const match = value.match(/^(\d{1,2}):(\d{2})\s*([AP]M)$/i);
+  if (!match) return "";
+  let hour = Number(match[1]) % 12;
+  if (match[3].toUpperCase() === "PM") hour += 12;
+  return `${String(hour).padStart(2, "0")}:${match[2]}`;
+};
+const displayFormTime = (value: string) =>
+  value
+    ? new Date(`2000-01-01T${value}:00`).toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : "—";
+const gigTimestamp = (date: string, time: string) =>
+  time ? new Date(`${date}T${time}:00`).toISOString() : null;
+const validateGig = (input: NewGigInput) => {
+  if (
+    !input.title.trim() ||
+    !input.venue.trim() ||
+    !input.date ||
+    !input.downbeat
+  )
+    return "Please complete the title, venue, date, and downbeat.";
+};
 const nav = [
   ["home", "Home", Home],
   ["songs", "Songs", Music2],
@@ -417,29 +451,32 @@ export default function App() {
         }),
       );
     }
-    const nextGigs: Gig[] = (gigResult.data || []).map((row) => ({
-      id: row.id,
-      title: row.title,
-      venue: row.venue,
-      address: row.address || "",
-      date: row.starts_at.slice(0, 10),
-      doors: formatTime(row.doors_at),
-      soundcheck: formatTime(row.soundcheck_at),
-      downbeat: formatTime(row.starts_at),
-      status: row.status || "Hold",
-      setlist: (setlistResult.data || [])
-        .filter((item) => item.gig_id === row.id)
-        .sort((a, b) => a.position - b.position)
-        .map((item) => item.song_id),
-      availability: Object.fromEntries(
-        (availabilityResult.data || [])
+    const nextGigs: Gig[] = (gigResult.data || []).map((row) => {
+      const startsAt = new Date(row.starts_at);
+      return {
+        id: row.id,
+        title: row.title,
+        venue: row.venue,
+        address: row.address || "",
+        date: localDateKey(startsAt),
+        doors: formatTime(row.doors_at),
+        soundcheck: formatTime(row.soundcheck_at),
+        downbeat: formatTime(row.starts_at),
+        status: row.status || "Hold",
+        setlist: (setlistResult.data || [])
           .filter((item) => item.gig_id === row.id)
-          .map((item) => [item.user_id, item.response]),
-      ),
-      itinerary: Array.isArray(row.itinerary) ? row.itinerary : [],
-      advance: row.advance || "",
-      fee: financeMap.get(row.id),
-    }));
+          .sort((a, b) => a.position - b.position)
+          .map((item) => item.song_id),
+        availability: Object.fromEntries(
+          (availabilityResult.data || [])
+            .filter((item) => item.gig_id === row.id)
+            .map((item) => [item.user_id, item.response]),
+        ),
+        itinerary: Array.isArray(row.itinerary) ? row.itinerary : [],
+        advance: row.advance || "",
+        fee: financeMap.get(row.id),
+      };
+    });
     const nextMembers: User[] = (profileResult.data || []).map((row) => ({
       id: row.id,
       name: row.name,
@@ -644,14 +681,24 @@ export default function App() {
   const addGig = async (input: NewGigInput) => {
     if (!user || !canEdit(user.role))
       return "Only Administrators and Bandleaders can add gigs.";
-    if (!input.title || !input.venue || !input.date || !input.downbeat)
-      return "Please complete the title, venue, date, and downbeat.";
+    const validationError = validateGig(input);
+    if (validationError) return validationError;
+    const cleaned = {
+      ...input,
+      title: input.title.trim(),
+      venue: input.venue.trim(),
+      address: input.address.trim(),
+      advance: input.advance.trim(),
+    };
     if (!supabase) {
       setGigs((items) => [
         ...items,
         {
           id: crypto.randomUUID(),
-          ...input,
+          ...cleaned,
+          doors: displayFormTime(cleaned.doors),
+          soundcheck: displayFormTime(cleaned.soundcheck),
+          downbeat: displayFormTime(cleaned.downbeat),
           setlist: [],
           availability: {},
           itinerary: [],
@@ -659,22 +706,72 @@ export default function App() {
       ]);
       return;
     }
-    const toTimestamp = (time: string) =>
-      time ? new Date(`${input.date}T${time}:00`).toISOString() : null;
     const { error } = await supabase.from("gigs").insert({
-      title: input.title.trim(),
-      venue: input.venue.trim(),
-      address: input.address.trim(),
-      starts_at: toTimestamp(input.downbeat),
-      doors_at: toTimestamp(input.doors),
-      soundcheck_at: toTimestamp(input.soundcheck),
-      status: input.status,
-      advance: input.advance.trim(),
+      title: cleaned.title,
+      venue: cleaned.venue,
+      address: cleaned.address,
+      starts_at: gigTimestamp(cleaned.date, cleaned.downbeat),
+      doors_at: gigTimestamp(cleaned.date, cleaned.doors),
+      soundcheck_at: gigTimestamp(cleaned.date, cleaned.soundcheck),
+      status: cleaned.status,
+      advance: cleaned.advance,
       itinerary: [],
       created_by: user.id,
     });
     if (error) return error.message;
     await loadBandData(user.role, user.id);
+  };
+  const updateGig = async (gigId: string, input: NewGigInput) => {
+    if (!user || !canEdit(user.role))
+      return "Only Administrators and Bandleaders can edit gigs.";
+    const validationError = validateGig(input);
+    if (validationError) return validationError;
+    const existing = gigs.find((item) => item.id === gigId);
+    if (!existing) return "This gig could not be found.";
+    const updated: Gig = {
+      ...existing,
+      ...input,
+      title: input.title.trim(),
+      venue: input.venue.trim(),
+      address: input.address.trim(),
+      advance: input.advance.trim(),
+      doors: displayFormTime(input.doors),
+      soundcheck: displayFormTime(input.soundcheck),
+      downbeat: displayFormTime(input.downbeat),
+    };
+    if (supabase) {
+      const { error } = await supabase
+        .from("gigs")
+        .update({
+          title: updated.title,
+          venue: updated.venue,
+          address: updated.address,
+          starts_at: gigTimestamp(input.date, input.downbeat),
+          doors_at: gigTimestamp(input.date, input.doors),
+          soundcheck_at: gigTimestamp(input.date, input.soundcheck),
+          status: input.status,
+          advance: updated.advance,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", gigId);
+      if (error) return error.message;
+    }
+    setGigs((items) =>
+      items.map((item) => (item.id === gigId ? updated : item)),
+    );
+    setSelectedGig((item) => (item?.id === gigId ? updated : item));
+  };
+  const deleteGig = async (gigId: string) => {
+    if (!user || !canEdit(user.role))
+      return "Only Administrators and Bandleaders can delete gigs.";
+    if (!gigs.some((item) => item.id === gigId))
+      return "This gig could not be found.";
+    if (supabase) {
+      const { error } = await supabase.from("gigs").delete().eq("id", gigId);
+      if (error) return error.message;
+    }
+    setGigs((items) => items.filter((item) => item.id !== gigId));
+    setSelectedGig((item) => (item?.id === gigId ? null : item));
   };
   const addSong = async (input: NewSongInput) => {
     if (!user || !canEdit(user.role))
@@ -739,11 +836,31 @@ export default function App() {
     setSelectedGig(null);
     setSelectedSong(null);
   };
+  const goHome = () => selectView("home");
+  const goBack = () => {
+    if (view === "calendar" && selectedGig) {
+      setSelectedGig(null);
+      return;
+    }
+    if (view === "songs" && selectedSong) {
+      setSelectedSong(null);
+      return;
+    }
+    goHome();
+  };
   if (stage && gig)
     return <StageMode gig={gig} onClose={() => setStage(false)} />;
   return (
     <BandDataContext.Provider
-      value={{ songs: catalog, members, saveNote, addSong, addGig }}
+      value={{
+        songs: catalog,
+        members,
+        saveNote,
+        addSong,
+        addGig,
+        updateGig,
+        deleteGig,
+      }}
     >
       <div className="app">
         <aside className={menu ? "open" : ""}>
@@ -756,6 +873,7 @@ export default function App() {
             <button
               className="icon-btn close-menu"
               onClick={() => setMenu(false)}
+              aria-label="Close navigation"
             >
               <X />
             </button>
@@ -780,7 +898,10 @@ export default function App() {
                 <small>{online ? "Just now" : "Will sync on reconnect"}</small>
               </span>
             </div>
-            <button className="profile" onClick={() => setView("settings")}>
+            <button
+              className="profile"
+              onClick={() => selectView("settings")}
+            >
               <span className="avatar">{user.initials}</span>
               <span>
                 <b>{user.name}</b>
@@ -793,14 +914,42 @@ export default function App() {
         {menu && <button className="scrim" onClick={() => setMenu(false)} />}
         <section className="main">
           <header>
-            <button className="icon-btn menu-btn" onClick={() => setMenu(true)}>
+            <button
+              className="icon-btn menu-btn"
+              onClick={() => setMenu(true)}
+              aria-label="Open navigation"
+            >
               <Menu />
             </button>
-            <div>
+            {view !== "home" && (
+              <button
+                className="header-back"
+                onClick={goBack}
+                aria-label="Back"
+              >
+                <ArrowLeft />
+                <span>Back</span>
+              </button>
+            )}
+            <div className="header-title">
               <p className="eyebrow">KEVIN THOMAS BAND</p>
-              <b>{nav.find((x) => x[0] === view)?.[1] || "Hub"}</b>
+              <b>
+                {view === "settings"
+                  ? "Settings"
+                  : nav.find((x) => x[0] === view)?.[1] || "Hub"}
+              </b>
             </div>
             <div className="header-actions">
+              {view !== "home" && (
+                <button
+                  className="header-home"
+                  onClick={goHome}
+                  aria-label="Go to dashboard"
+                  title="Dashboard"
+                >
+                  <Home /> <span>Dashboard</span>
+                </button>
+              )}
               <Badge tone={online ? "success" : "warning"}>
                 {online ? <Cloud /> : <CloudOff />}
                 {online ? "Synced" : "Offline"}
@@ -821,7 +970,7 @@ export default function App() {
                   setSelectedGig(g);
                   setStage(true);
                 }}
-                onSongs={() => setView("songs")}
+                onSongs={() => selectView("songs")}
               />
             )}
             {view === "songs" && (
@@ -1447,8 +1596,10 @@ function Calendar({
   onAvailability: (id: string, a: Availability) => void;
   onStage: () => void;
 }) {
-  const { songs, addGig } = useBandData();
+  const { songs, addGig, updateGig, deleteGig } = useBandData();
   const [showAddGig, setShowAddGig] = useState(false);
+  const [editingGig, setEditingGig] = useState<Gig | null>(null);
+  const [deletingGig, setDeletingGig] = useState<Gig | null>(null);
   const calendarDate = gigs[0]
     ? new Date(`${gigs[0].date}T12:00:00`)
     : new Date();
@@ -1459,8 +1610,6 @@ function Calendar({
     day.setDate(weekStart.getDate() + index);
     return day;
   });
-  const localDateKey = (date: Date) =>
-    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   if (!gig)
     return (
       <>
@@ -1504,6 +1653,12 @@ function Calendar({
             ))}
           </div>
         </div>
+        {!canEdit(user.role) && (
+          <p className="notice">
+            <ShieldCheck /> View only — Administrators and Bandleaders manage
+            calendar events.
+          </p>
+        )}
         <div className="gig-list">
           {gigs.map((g) => {
             const gigDate = new Date(`${g.date}T12:00:00`);
@@ -1556,9 +1711,24 @@ function Calendar({
             <CalendarDays /> {gig.date} · <MapPin /> {gig.venue}
           </p>
         </div>
-        <button className="primary compact" onClick={onStage}>
-          <Zap /> Stage mode
-        </button>
+        <div className="page-actions">
+          {canEdit(user.role) && (
+            <>
+              <button className="secondary" onClick={() => setEditingGig(gig)}>
+                <Pencil /> Edit gig
+              </button>
+              <button
+                className="secondary destructive"
+                onClick={() => setDeletingGig(gig)}
+              >
+                <Trash2 /> Delete gig
+              </button>
+            </>
+          )}
+          <button className="primary compact" onClick={onStage}>
+            <Zap /> Stage mode
+          </button>
+        </div>
       </div>
       <div className="detail-grid">
         <article>
@@ -1625,26 +1795,53 @@ function Calendar({
           ))}
         </article>
       </div>
+      {editingGig && (
+        <GigForm
+          gig={editingGig}
+          onClose={() => setEditingGig(null)}
+          onSave={async (input) => {
+            const error = await updateGig(editingGig.id, input);
+            if (!error) setEditingGig(null);
+            return error;
+          }}
+        />
+      )}
+      {deletingGig && (
+        <DeleteGigDialog
+          gig={deletingGig}
+          onClose={() => setDeletingGig(null)}
+          onDelete={async () => {
+            const error = await deleteGig(deletingGig.id);
+            if (!error) {
+              setDeletingGig(null);
+              onSelect(null);
+            }
+            return error;
+          }}
+        />
+      )}
     </>
   );
 }
 function GigForm({
+  gig,
   onClose,
   onSave,
 }: {
+  gig?: Gig;
   onClose: () => void;
   onSave: (gig: NewGigInput) => Promise<string | void>;
 }) {
   const [form, setForm] = useState<NewGigInput>({
-    title: "",
-    venue: "",
-    address: "",
-    date: new Date().toISOString().slice(0, 10),
-    doors: "19:00",
-    soundcheck: "17:00",
-    downbeat: "20:30",
-    status: "Hold",
-    advance: "",
+    title: gig?.title || "",
+    venue: gig?.venue || "",
+    address: gig?.address || "",
+    date: gig?.date || localDateKey(new Date()),
+    doors: gig ? toTimeInput(gig.doors) : "19:00",
+    soundcheck: gig ? toTimeInput(gig.soundcheck) : "17:00",
+    downbeat: gig ? toTimeInput(gig.downbeat) : "20:30",
+    status: gig?.status || "Hold",
+    advance: gig?.advance || "",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1659,14 +1856,25 @@ function GigForm({
     setBusy(false);
   };
   return (
-    <div className="modal-backdrop" role="presentation">
-      <form className="modal-card" onSubmit={submit}>
+    <div className="modal-backdrop">
+      <form
+        className="modal-card"
+        onSubmit={submit}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="gig-form-title"
+      >
         <div className="modal-head">
           <div>
-            <p className="eyebrow">NEW EVENT</p>
-            <h2>Add a gig</h2>
+            <p className="eyebrow">{gig ? "EDIT EVENT" : "NEW EVENT"}</p>
+            <h2 id="gig-form-title">{gig ? "Edit gig" : "Add a gig"}</h2>
           </div>
-          <button type="button" className="icon-btn" onClick={onClose}>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            aria-label="Close gig form"
+          >
             <X />
           </button>
         </div>
@@ -1707,7 +1915,7 @@ function GigForm({
             onChange={(event) => field("address", event.target.value)}
           />
         </label>
-        <div className="form-grid three">
+        <div className="form-grid four">
           <label>
             Date*
             <input
@@ -1715,6 +1923,14 @@ function GigForm({
               type="date"
               value={form.date}
               onChange={(event) => field("date", event.target.value)}
+            />
+          </label>
+          <label>
+            Doors
+            <input
+              type="time"
+              value={form.doors}
+              onChange={(event) => field("doors", event.target.value)}
             />
           </label>
           <label>
@@ -1748,10 +1964,65 @@ function GigForm({
             Cancel
           </button>
           <button className="primary compact" disabled={busy}>
-            {busy ? "Saving..." : "Save gig"}
+            {busy ? "Saving..." : gig ? "Save changes" : "Save gig"}
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+function DeleteGigDialog({
+  gig,
+  onClose,
+  onDelete,
+}: {
+  gig: Gig;
+  onClose: () => void;
+  onDelete: () => Promise<string | void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const confirmDelete = async () => {
+    setBusy(true);
+    setError("");
+    const result = await onDelete();
+    if (result) setError(result);
+    setBusy(false);
+  };
+  return (
+    <div className="modal-backdrop">
+      <section
+        className="modal-card confirm-card"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="delete-gig-title"
+        aria-describedby="delete-gig-description"
+      >
+        <div className="danger-icon">
+          <Trash2 />
+        </div>
+        <p className="eyebrow">DELETE EVENT</p>
+        <h2 id="delete-gig-title">Delete this gig?</h2>
+        <p id="delete-gig-description">
+          <strong>{gig.title}</strong> will be removed from the shared calendar,
+          including its availability responses and setlist. This cannot be
+          undone.
+        </p>
+        {error && <p className="auth-message error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose} disabled={busy}>
+            Keep gig
+          </button>
+          <button
+            type="button"
+            className="danger-button"
+            onClick={confirmDelete}
+            disabled={busy}
+          >
+            <Trash2 /> {busy ? "Deleting..." : "Delete gig"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
