@@ -27,6 +27,7 @@ import {
   GripVertical,
   Home,
   LogOut,
+  Mail,
   MapPin,
   Menu,
   Mic2,
@@ -44,7 +45,7 @@ import {
 } from "lucide-react";
 import { gigs as seedGigs, songs as seedSongs, users } from "./data";
 import { canEdit, canSeeFinance, exportGigPdf } from "./lib";
-import type { Availability, Gig, Song, User } from "./types";
+import type { Availability, Gig, Role, Song, User } from "./types";
 import { isSupabaseConfigured, supabase } from "./supabase";
 type View =
   | "home"
@@ -62,6 +63,11 @@ type BandDataValue = {
   addGig: (gig: NewGigInput) => Promise<string | void>;
   updateGig: (gigId: string, gig: NewGigInput) => Promise<string | void>;
   deleteGig: (gigId: string) => Promise<string | void>;
+  inviteMember: (member: InviteMemberInput) => Promise<string | void>;
+  updateProfile: (
+    memberId: string,
+    profile: ProfileInput,
+  ) => Promise<string | void>;
 };
 type NewSongInput = {
   title: string;
@@ -84,6 +90,24 @@ type NewGigInput = {
   status: string;
   advance: string;
 };
+type InviteMemberInput = {
+  email: string;
+  name: string;
+  instrument: string;
+  role: Role;
+};
+type ProfileInput = {
+  name: string;
+  instrument: string;
+  role: Role;
+};
+const roles: Role[] = [
+  "Administrator",
+  "Bandleader",
+  "Band member",
+  "Production crew",
+  "Substitute musician",
+];
 const BandDataContext = createContext<BandDataValue>({
   songs: seedSongs,
   members: users,
@@ -92,6 +116,8 @@ const BandDataContext = createContext<BandDataValue>({
   addGig: async () => {},
   updateGig: async () => {},
   deleteGig: async () => {},
+  inviteMember: async () => {},
+  updateProfile: async () => {},
 });
 const useBandData = () => useContext(BandDataContext);
 const formatDuration = (seconds: number | null) => {
@@ -370,6 +396,7 @@ export default function App() {
   const [stage, setStage] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
   const [menu, setMenu] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
   useEffect(() => {
     const onlineHandler = () => setOnline(true);
     const offlineHandler = () => setOnline(false);
@@ -556,6 +583,10 @@ export default function App() {
           setUser(null);
           setAuthLoading(false);
         } else if (session) {
+          if (event === "PASSWORD_RECOVERY") {
+            setPasswordRecovery(true);
+            setView("settings");
+          }
           setTimeout(
             () =>
               loadProfile(session.user.id, session.user.email || "").catch(() =>
@@ -598,6 +629,14 @@ export default function App() {
       redirectTo: location.origin,
     });
     return error?.message;
+  };
+  const handleSetPassword = async (password: string) => {
+    if (!supabase) return "Password changes require the Supabase connection.";
+    if (password.length < 12)
+      return "Use at least 12 characters for the new password.";
+    const { error } = await supabase.auth.updateUser({ password });
+    if (error) return error.message;
+    setPasswordRecovery(false);
   };
   const handleLogout = async () => {
     if (supabase) await supabase.auth.signOut();
@@ -773,6 +812,91 @@ export default function App() {
     setGigs((items) => items.filter((item) => item.id !== gigId));
     setSelectedGig((item) => (item?.id === gigId ? null : item));
   };
+  const inviteMember = async (input: InviteMemberInput) => {
+    if (!user || user.role !== "Administrator")
+      return "Only Administrators can invite members.";
+    const cleaned: InviteMemberInput = {
+      email: input.email.trim().toLowerCase(),
+      name: input.name.trim(),
+      instrument: input.instrument.trim(),
+      role: input.role,
+    };
+    if (!cleaned.name || !cleaned.email)
+      return "Please enter the member's name and email address.";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned.email))
+      return "Enter a valid email address.";
+    if (!roles.includes(cleaned.role)) return "Choose a valid member role.";
+    if (!supabase) {
+      const newMember: User = {
+        id: crypto.randomUUID(),
+        ...cleaned,
+        instrument: cleaned.instrument || "Band team",
+        initials: cleaned.name
+          .split(/\s+/)
+          .map((part) => part[0])
+          .join("")
+          .slice(0, 2)
+          .toUpperCase(),
+      };
+      setMembers((items) => [...items, newMember]);
+      return;
+    }
+    const { data, error } = await supabase.functions.invoke("invite-member", {
+      body: cleaned,
+    });
+    if (error)
+      return error.message.includes("non-2xx")
+        ? "The invitation service rejected the request. Check the Edge Function logs and SITE_URL setting."
+        : error.message;
+    if (data?.error) return String(data.error);
+    await loadBandData(user.role, user.id);
+  };
+  const updateProfile = async (memberId: string, input: ProfileInput) => {
+    if (!user) return "Sign in before editing a profile.";
+    const member = members.find((item) => item.id === memberId);
+    if (!member) return "This member profile could not be found.";
+    const isAdministrator = user.role === "Administrator";
+    if (!isAdministrator && memberId !== user.id)
+      return "Only Administrators can edit another member's profile.";
+    const name = input.name.trim();
+    const instrument = input.instrument.trim();
+    if (!name) return "Enter the member's name.";
+    if (name.length > 100 || instrument.length > 100)
+      return "Names and instruments must be 100 characters or fewer.";
+    const role = isAdministrator ? input.role : member.role;
+    if (!roles.includes(role)) return "Choose a valid member role.";
+    if (
+      member.role === "Administrator" &&
+      role !== "Administrator" &&
+      members.filter((item) => item.role === "Administrator").length <= 1
+    )
+      return "The last Administrator cannot be demoted.";
+    if (supabase) {
+      const { error } = await supabase.rpc("update_member_profile", {
+        target_user_id: memberId,
+        new_name: name,
+        new_instrument: instrument,
+        new_role: role,
+      });
+      if (error) return error.message;
+    }
+    const updated = {
+      ...member,
+      name,
+      instrument: instrument || "Band team",
+      role,
+      initials: name
+        .split(/\s+/)
+        .map((part) => part[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase(),
+    };
+    setMembers((items) =>
+      items.map((item) => (item.id === memberId ? updated : item)),
+    );
+    if (memberId === user.id) setUser(updated);
+  };
   const addSong = async (input: NewSongInput) => {
     if (!user || !canEdit(user.role))
       return "Only Administrators and Bandleaders can add songs.";
@@ -860,6 +984,8 @@ export default function App() {
         addGig,
         updateGig,
         deleteGig,
+        inviteMember,
+        updateProfile,
       }}
     >
       <div className="app">
@@ -1004,9 +1130,15 @@ export default function App() {
                 message="Add a gig before creating its production packet."
               />
             )}{" "}
-            {view === "team" && <Team gigs={gigs} />}{" "}
+            {view === "team" && <Team gigs={gigs} user={user} />}{" "}
             {view === "settings" && (
-              <SettingsView user={user} onLogout={handleLogout} />
+              <SettingsView
+                user={user}
+                onLogout={handleLogout}
+                onReset={() => handleReset(user.email)}
+                onSetPassword={handleSetPassword}
+                passwordRecovery={passwordRecovery}
+              />
             )}
           </div>
         </section>
@@ -2059,8 +2191,12 @@ function Production({ gig }: { gig: Gig }) {
     </>
   );
 }
-function Team({ gigs }: { gigs: Gig[] }) {
-  const { members } = useBandData();
+function Team({ gigs, user }: { gigs: Gig[]; user: User }) {
+  const { members, inviteMember, updateProfile } = useBandData();
+  const [showInvite, setShowInvite] = useState(false);
+  const [editing, setEditing] = useState<User | null>(null);
+  const [message, setMessage] = useState("");
+  const isAdministrator = user.role === "Administrator";
   return (
     <>
       <div className="page-title">
@@ -2069,10 +2205,19 @@ function Team({ gigs }: { gigs: Gig[] }) {
           <h1>Band & crew</h1>
           <p>Roles and availability across the team.</p>
         </div>
-        <button className="primary compact">
-          <Plus /> Invite member
-        </button>
+        {isAdministrator && (
+          <button className="primary compact" onClick={() => setShowInvite(true)}>
+            <Plus /> Invite member
+          </button>
+        )}
       </div>
+      {message && <p className="auth-message team-message">{message}</p>}
+      {!isAdministrator && (
+        <p className="notice">
+          <ShieldCheck /> Administrators send invitations and manage roles. You
+          can edit your own profile.
+        </p>
+      )}
       <div className="team-grid">
         {members.map((u) => (
           <article key={u.id}>
@@ -2082,22 +2227,400 @@ function Team({ gigs }: { gigs: Gig[] }) {
               <p>{u.instrument}</p>
               <Badge>{u.role}</Badge>
             </div>
-            <div
-              className={`dot ${gigs[0]?.availability[u.id] || "pending"}`}
-            />
+            <div className="member-actions">
+              {(isAdministrator || u.id === user.id) && (
+                <button
+                  className="member-edit"
+                  onClick={() => setEditing(u)}
+                  aria-label={`Edit ${u.name}`}
+                >
+                  <Pencil /> Edit
+                </button>
+              )}
+              <span
+                className={`dot ${gigs[0]?.availability[u.id] || "pending"}`}
+                title={gigs[0]?.availability[u.id] || "pending"}
+              />
+            </div>
           </article>
         ))}
       </div>
+      {showInvite && (
+        <InviteMemberForm
+          onClose={() => setShowInvite(false)}
+          onSave={async (input) => {
+            const error = await inviteMember(input);
+            if (!error) {
+              setShowInvite(false);
+              setMessage(
+                isSupabaseConfigured
+                  ? `Invitation sent to ${input.email.trim()}.`
+                  : `${input.name.trim()} was added to the demo team. No email was sent in demo mode.`,
+              );
+            }
+            return error;
+          }}
+        />
+      )}
+      {editing && (
+        <ProfileForm
+          member={editing}
+          canChangeRole={isAdministrator}
+          onClose={() => setEditing(null)}
+          onSave={async (input) => {
+            const error = await updateProfile(editing.id, input);
+            if (!error) {
+              setEditing(null);
+              setMessage(`${input.name.trim()}'s profile was updated.`);
+            }
+            return error;
+          }}
+        />
+      )}
     </>
+  );
+}
+function InviteMemberForm({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (member: InviteMemberInput) => Promise<string | void>;
+}) {
+  const [form, setForm] = useState<InviteMemberInput>({
+    email: "",
+    name: "",
+    instrument: "",
+    role: "Band member",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const result = await onSave(form);
+    if (result) setError(result);
+    setBusy(false);
+  };
+  return (
+    <div className="modal-backdrop">
+      <form
+        className="modal-card member-form"
+        onSubmit={submit}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invite-member-title"
+      >
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">NEW TEAM MEMBER</p>
+            <h2 id="invite-member-title">Invite member</h2>
+          </div>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            aria-label="Close invitation form"
+          >
+            <X />
+          </button>
+        </div>
+        <label>
+          Email address*
+          <input
+            required
+            type="email"
+            value={form.email}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                email: event.target.value,
+              }))
+            }
+            placeholder="member@example.com"
+          />
+        </label>
+        <label>
+          Full name*
+          <input
+            required
+            value={form.name}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, name: event.target.value }))
+            }
+            placeholder="Alex Morgan"
+          />
+        </label>
+        <div className="form-grid">
+          <label>
+            Instrument or job
+            <input
+              value={form.instrument}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  instrument: event.target.value,
+                }))
+              }
+              placeholder="Drums, vocals, lighting…"
+            />
+          </label>
+          <label>
+            Role*
+            <select
+              value={form.role}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  role: event.target.value as Role,
+                }))
+              }
+            >
+              {roles.map((role) => (
+                <option key={role}>{role}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p className="form-note">
+          <Mail /> Supabase will email a secure invitation link. No password is
+          created or shared by the band.
+        </p>
+        {error && <p className="auth-message error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="primary compact" disabled={busy}>
+            <Mail /> {busy ? "Sending..." : "Send invitation"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+function ProfileForm({
+  member,
+  canChangeRole,
+  onClose,
+  onSave,
+}: {
+  member: User;
+  canChangeRole: boolean;
+  onClose: () => void;
+  onSave: (profile: ProfileInput) => Promise<string | void>;
+}) {
+  const [form, setForm] = useState<ProfileInput>({
+    name: member.name,
+    instrument: member.instrument === "Band team" ? "" : member.instrument,
+    role: member.role,
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const result = await onSave(form);
+    if (result) setError(result);
+    setBusy(false);
+  };
+  return (
+    <div className="modal-backdrop">
+      <form
+        className="modal-card member-form"
+        onSubmit={submit}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="profile-form-title"
+      >
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">MEMBER PROFILE</p>
+            <h2 id="profile-form-title">Edit profile</h2>
+          </div>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            aria-label="Close profile form"
+          >
+            <X />
+          </button>
+        </div>
+        <label>
+          Full name*
+          <input
+            required
+            maxLength={100}
+            value={form.name}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, name: event.target.value }))
+            }
+          />
+        </label>
+        <label>
+          Instrument or job
+          <input
+            maxLength={100}
+            value={form.instrument}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                instrument: event.target.value,
+              }))
+            }
+          />
+        </label>
+        <label>
+          Role
+          <select
+            value={form.role}
+            disabled={!canChangeRole}
+            onChange={(event) =>
+              setForm((current) => ({
+                ...current,
+                role: event.target.value as Role,
+              }))
+            }
+          >
+            {roles.map((role) => (
+              <option key={role}>{role}</option>
+            ))}
+          </select>
+        </label>
+        {!canChangeRole && (
+          <p className="form-note">
+            <ShieldCheck /> Only an Administrator can change account roles.
+          </p>
+        )}
+        {error && <p className="auth-message error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="primary compact" disabled={busy}>
+            {busy ? "Saving..." : "Save profile"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+function PasswordForm({
+  recovery,
+  onClose,
+  onSave,
+}: {
+  recovery: boolean;
+  onClose: () => void;
+  onSave: (password: string) => Promise<string | void>;
+}) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (password !== confirmation) {
+      setError("The passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const result = await onSave(password);
+    if (result) setError(result);
+    setBusy(false);
+  };
+  return (
+    <div className="modal-backdrop">
+      <form
+        className="modal-card member-form"
+        onSubmit={submit}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="password-form-title"
+      >
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">
+              {recovery ? "COMPLETE ACCOUNT SETUP" : "ACCOUNT SECURITY"}
+            </p>
+            <h2 id="password-form-title">Set password</h2>
+          </div>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            aria-label="Close password form"
+          >
+            <X />
+          </button>
+        </div>
+        <label>
+          New password*
+          <input
+            required
+            minLength={12}
+            type="password"
+            autoComplete="new-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </label>
+        <label>
+          Confirm new password*
+          <input
+            required
+            minLength={12}
+            type="password"
+            autoComplete="new-password"
+            value={confirmation}
+            onChange={(event) => setConfirmation(event.target.value)}
+          />
+        </label>
+        <p className="form-note">
+          <ShieldCheck /> Use at least 12 characters and a password that is not
+          shared with another band member.
+        </p>
+        {error && <p className="auth-message error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button className="primary compact" disabled={busy}>
+            {busy ? "Updating..." : "Update password"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 function SettingsView({
   user,
   onLogout,
+  onReset,
+  onSetPassword,
+  passwordRecovery,
 }: {
   user: User;
   onLogout: () => void;
+  onReset: () => Promise<string | void>;
+  onSetPassword: (password: string) => Promise<string | void>;
+  passwordRecovery: boolean;
 }) {
+  const { updateProfile } = useBandData();
+  const [editing, setEditing] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(passwordRecovery);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    if (passwordRecovery) setChangingPassword(true);
+  }, [passwordRecovery]);
+  const resetPassword = async () => {
+    const result = await onReset();
+    setMessage(result || "Password reset email sent. Check your inbox.");
+  };
   return (
     <>
       <div className="page-title">
@@ -2115,7 +2638,7 @@ function SettingsView({
           <p>{user.email}</p>
           <Badge>{user.role}</Badge>
         </div>
-        <button>Edit profile</button>
+        <button onClick={() => setEditing(true)}>Edit profile</button>
       </div>
       <div className="settings-card">
         <ShieldCheck />
@@ -2126,11 +2649,44 @@ function SettingsView({
             are protected by Supabase Auth.
           </p>
         </div>
-        <button>Reset password</button>
+        <div className="settings-actions">
+          <button onClick={() => setChangingPassword(true)}>Set password</button>
+          <button onClick={resetPassword}>Email reset link</button>
+        </div>
       </div>
+      {message && <p className="auth-message settings-message">{message}</p>}
       <button className="logout" onClick={onLogout}>
         <LogOut /> Sign out
       </button>
+      {editing && (
+        <ProfileForm
+          member={user}
+          canChangeRole={user.role === "Administrator"}
+          onClose={() => setEditing(false)}
+          onSave={async (input) => {
+            const error = await updateProfile(user.id, input);
+            if (!error) {
+              setEditing(false);
+              setMessage("Your profile was updated.");
+            }
+            return error;
+          }}
+        />
+      )}
+      {changingPassword && (
+        <PasswordForm
+          recovery={passwordRecovery}
+          onClose={() => setChangingPassword(false)}
+          onSave={async (password) => {
+            const error = await onSetPassword(password);
+            if (!error) {
+              setChangingPassword(false);
+              setMessage("Your password was updated.");
+            }
+            return error;
+          }}
+        />
+      )}
     </>
   );
 }

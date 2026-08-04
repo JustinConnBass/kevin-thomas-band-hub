@@ -1186,6 +1186,27 @@ textarea {
   align-items: center;
   gap: 16px;
 }
+.member-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.member-edit {
+  border: 1px solid var(--line);
+  background: #f7f6f1;
+  color: var(--ink);
+  border-radius: 5px;
+  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+.member-edit svg {
+  width: 14px;
+}
 .team-grid h3,
 .team-grid p {
   margin: 0;
@@ -1201,6 +1222,10 @@ textarea {
   border-radius: 50%;
   margin-left: auto;
   background: #aaa;
+}
+.member-actions .dot {
+  margin-left: 0;
+  flex: none;
 }
 .dot.available {
   background: #55a466;
@@ -1232,6 +1257,48 @@ textarea {
 }
 .settings-card > svg {
   color: #60705b;
+}
+.team-message,
+.settings-message {
+  margin: 0 0 18px;
+  max-width: 800px;
+}
+.member-form {
+  width: min(560px, 100%);
+}
+.form-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 12px;
+  border-radius: 5px;
+  background: #eeefe8;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.form-note svg {
+  width: 17px;
+  flex: none;
+}
+.member-form select:disabled {
+  color: #666c63;
+  background: #ecece6;
+  cursor: not-allowed;
+}
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.settings-actions button {
+  border: 1px solid var(--line);
+  background: #faf9f5;
+  border-radius: 5px;
+  padding: 10px 12px;
+  font-weight: 700;
 }
 .logout {
   border: 0;
@@ -1686,6 +1753,15 @@ textarea {
   .team-grid {
     grid-template-columns: 1fr;
   }
+  .team-grid article {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .member-actions {
+    width: calc(100% - 68px);
+    margin-left: 68px;
+    justify-content: space-between;
+  }
   .settings-card {
     align-items: flex-start;
     flex-wrap: wrap;
@@ -1693,6 +1769,9 @@ textarea {
   .settings-card button {
     width: 100%;
     justify-content: center;
+  }
+  .settings-actions {
+    width: 100%;
   }
   .stage-mode > header {
     padding: 0 12px;
